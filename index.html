@@ -97,6 +97,24 @@
     border-top: 1px solid #eef0f2; padding-top: 14px;
   }
   .hint b { color: #5c6270; font-weight: 600; }
+
+  .wprev {
+    width: 26px; height: 26px; flex: 0 0 auto;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 50%; background: #fafbfc;
+    box-shadow: 0 0 0 1px #e3e5e8 inset;
+  }
+  .wprev i {
+    display: block; width: 7px; height: 7px; border-radius: 50%;
+    background: #1f2329; transition: width .1s, height .1s;
+  }
+
+  input[type=date]:disabled { opacity: .42; cursor: not-allowed; }
+
+  #clear.armed {
+    background: #fdecec; border-color: #eeb0b0; color: #b3261e;
+  }
+  #clear.armed:hover { background: #fbdede; }
   .toast {
     position: fixed; left: 50%; bottom: 34px; transform: translate(-50%, 16px);
     background: #1f2329; color: #fff; font-size: 13px; padding: 9px 18px;
@@ -145,6 +163,7 @@
       <div class="group">
         <label>粗细</label>
         <input id="width" type="range" min="1.5" max="8" step="0.5" value="3.2">
+        <span class="wprev" aria-hidden="true"><i id="wprevDot"></i></span>
       </div>
 
       <div class="group">
@@ -175,6 +194,8 @@
 <script>
 (function () {
   const W = 1200, H = 420, S = 2;          // 逻辑尺寸 × 超采样，导出更清晰
+  const DATE_GAP = 64;                     // 勾选日期时，内容画布下方追加的逻辑高度
+  const CROP_PAD = 24;                     // 导出裁剪时四周留的逻辑留白
   const cvs = document.getElementById('pad');
   const ctx = cvs.getContext('2d');
 
@@ -193,18 +214,22 @@
   let prev = null, prevMid = null, moved = false;
   const history = [];
   const MAX_HISTORY = 6;
+  const undoBtn = document.getElementById('undo');
+
+  function syncUndo() { undoBtn.disabled = history.length === 0; }
 
   function snapshot() {
     try { history.push(ctx.getImageData(0, 0, cvs.width, cvs.height)); } catch (e) {}
     if (history.length > MAX_HISTORY) history.shift();
+    syncUndo();
   }
 
-  function clearAll() {
+  // 清空笔迹但保留历史 —— 清空本身也应该能撤销回来
+  function clearCanvas() {
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, cvs.width, cvs.height);
     ctx.restore();
-    history.length = 0;
   }
 
   function toLocal(e, r) {
@@ -309,26 +334,66 @@
     });
   }
 
-  document.getElementById('width').addEventListener('input', e => {
-    lineWidth = parseFloat(e.target.value);
-  });
+  const widthEl = document.getElementById('width');
+  const wprevDot = document.getElementById('wprevDot');
 
-  document.getElementById('undo').addEventListener('click', () => {
+  function syncWidth() {
+    lineWidth = parseFloat(widthEl.value);
+    if (wprevDot) {
+      const d = Math.min(22, Math.max(3, lineWidth * 2.2));
+      wprevDot.style.width = d + 'px';
+      wprevDot.style.height = d + 'px';
+    }
+  }
+  widthEl.addEventListener('input', syncWidth);
+
+  function doUndo() {
     const img = history.pop();
     if (!img) { toast('没有可撤销的笔迹'); return; }
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.putImageData(img, 0, 0);
     ctx.restore();
-    // putImageData 会把变换状态之外的像素覆盖，重建变换以继续书写
+    // putImageData 直接写设备像素，之后要重建变换才能继续按逻辑坐标书写
     ctx.setTransform(S, 0, 0, S, 0, 0);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
+    syncUndo();
+  }
+  undoBtn.addEventListener('click', doUndo);
+
+  // Ctrl / Cmd + Z 撤销
+  window.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && (e.key || '').toLowerCase() === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      doUndo();
+    }
   });
 
-  document.getElementById('clear').addEventListener('click', () => {
-    clearAll();
-    toast('已清空');
+  // 清空要点两次，误触一次不会丢东西；清空前的状态留在历史里，撤销能找回
+  const clearBtn = document.getElementById('clear');
+  let clearArmed = false, clearTimer;
+
+  function disarmClear() {
+    clearArmed = false;
+    clearBtn.classList.remove('armed');
+    clearBtn.textContent = '清空';
+    clearTimeout(clearTimer);
+  }
+
+  clearBtn.addEventListener('click', () => {
+    if (!clearArmed) {
+      if (inkBounds(cvs) === null) { toast('画布本来就是空的'); return; }
+      clearArmed = true;
+      clearBtn.classList.add('armed');
+      clearBtn.textContent = '再点一次';
+      clearTimer = setTimeout(disarmClear, 3000);
+      return;
+    }
+    disarmClear();
+    snapshot();
+    clearCanvas();
+    toast('已清空，按撤销可找回');
   });
 
   // 日期默认今天
@@ -339,52 +404,99 @@
     String(now.getDate()).padStart(2, '0');
   dateInput.value = iso;
 
-  function compose(whiteBg) {
-    const out = document.createElement('canvas');
-    out.width = cvs.width;
-    out.height = cvs.height + (document.getElementById('withDate').checked ? Math.round(64 * S) : 0);
-    const o = out.getContext('2d');
+  // 不勾「加日期」时，日期框是没用的，直接禁用掉，省得误点
+  const withDateEl = document.getElementById('withDate');
+  function syncDateState() { dateInput.disabled = !withDateEl.checked; }
+  withDateEl.addEventListener('change', syncDateState);
 
-    if (whiteBg) {
-      o.fillStyle = '#ffffff';
-      o.fillRect(0, 0, out.width, out.height);
-    }
+  // 把签名（以及可选的日期）合到一张等尺寸画布上，裁剪交给下一步。
+  // 日期贴着签名的右下角走，不钉在画布右边 —— 否则裁剪后中间会空出一大片
+  function buildContent() {
+    const useDate = withDateEl.checked;
+    const c = document.createElement('canvas');
+    c.width = cvs.width;
+    c.height = cvs.height + DATE_GAP * S;
+    const o = c.getContext('2d');
     o.drawImage(cvs, 0, 0);
 
-    if (document.getElementById('withDate').checked) {
+    const sig = inkBounds(cvs);
+
+    if (useDate) {
       const v = dateInput.value || iso;
       const [y, m, d] = v.split('-');
       const text = y + ' 年 ' + parseInt(m, 10) + ' 月 ' + parseInt(d, 10) + ' 日';
+      const ax = sig ? Math.min(W - 20, sig.x1 / S + 10) : W - 40;
+      const ay = sig ? Math.min(H + 54, sig.y1 / S + 46) : H + 54;
       o.setTransform(S, 0, 0, S, 0, 0);
       o.fillStyle = color;
       o.font = '400 30px "KaiTi", "STKaiti", "Microsoft YaHei", sans-serif';
       o.textAlign = 'right';
       o.textBaseline = 'bottom';
-      o.fillText(text, W - 40, H + 54);
+      o.fillText(text, ax, ay);
     }
-    return out;
+    return { canvas: c, sig: sig };
   }
 
-  function isEmpty() {
-    const d = ctx.getImageData(0, 0, cvs.width, cvs.height).data;
-    for (let i = 3; i < d.length; i += 4) if (d[i] > 0) return false;
-    return true;
+  // 扫 alpha 通道求墨迹外接框（设备像素）。没有任何内容返回 null
+  function inkBounds(c) {
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let x0 = c.width, y0 = c.height, x1 = -1, y1 = -1;
+    for (let y = 0; y < c.height; y++) {
+      const row = y * c.width * 4;
+      for (let x = 0; x < c.width; x++) {
+        if (d[row + x * 4 + 3] > 8) {
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          if (y > y1) y1 = y;
+        }
+      }
+    }
+    return x1 < 0 ? null : { x0: x0, y0: y0, x1: x1 + 1, y1: y1 + 1 };
   }
 
-  function download(whiteBg, name) {
-    if (isEmpty()) { toast('先写个名字再导出'); return; }
-    const out = compose(whiteBg);
+  function stamp() {
+    const n = new Date();
+    const p = v => String(v).padStart(2, '0');
+    return '' + n.getFullYear() + p(n.getMonth() + 1) + p(n.getDate()) +
+      '_' + p(n.getHours()) + p(n.getMinutes());
+  }
+
+  function download(whiteBg, base) {
+    const built = buildContent();
+    const content = built.canvas;
+    if (!built.sig) { toast('先写个名字再导出'); return; }
+    const b = inkBounds(content);
+
+    // 按墨迹外接框裁掉四周空白，只留一点呼吸感
+    const pad = CROP_PAD * S;
+    const x0 = Math.max(0, b.x0 - pad);
+    const y0 = Math.max(0, b.y0 - pad);
+    const x1 = Math.min(content.width, b.x1 + pad);
+    const y1 = Math.min(content.height, b.y1 + pad);
+
+    const out = document.createElement('canvas');
+    out.width = x1 - x0;
+    out.height = y1 - y0;
+    const o = out.getContext('2d');
+    if (whiteBg) {
+      o.fillStyle = '#ffffff';
+      o.fillRect(0, 0, out.width, out.height);
+    }
+    o.drawImage(content, x0, y0, out.width, out.height, 0, 0, out.width, out.height);
+
+    const name = base + '_' + stamp() + '.png';
     const a = document.createElement('a');
     a.download = name;
     a.href = out.toDataURL('image/png');
     document.body.appendChild(a);
     a.click();
     a.remove();
-    toast('已导出 ' + name);
+    toast('已导出 ' + out.width + ' × ' + out.height);
   }
 
-  document.getElementById('savePng').addEventListener('click', () => download(false, '签名_透明.png'));
-  document.getElementById('saveWhite').addEventListener('click', () => download(true, '签名_白底.png'));
+  document.getElementById('savePng').addEventListener('click', () => download(false, '签名_透明'));
+  document.getElementById('saveWhite').addEventListener('click', () => download(true, '签名_白底'));
 
   let toastTimer;
   function toast(msg) {
@@ -394,6 +506,46 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.classList.remove('show'), 1700);
   }
+
+  // 记住上次用的墨色、粗细、是否带日期
+  const PREF_KEY = 'signpad.prefs.v1';
+
+  function savePrefs() {
+    try {
+      localStorage.setItem(PREF_KEY, JSON.stringify({
+        color: color, lineWidth: lineWidth, withDate: withDateEl.checked
+      }));
+    } catch (_) {}
+  }
+
+  (function restorePrefs() {
+    let p = null;
+    try { p = JSON.parse(localStorage.getItem(PREF_KEY) || 'null'); } catch (_) { return; }
+    if (!p) return;
+
+    if (typeof p.lineWidth === 'number' && p.lineWidth >= 1.5 && p.lineWidth <= 8) {
+      widthEl.value = String(p.lineWidth);
+    }
+    if (typeof p.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(p.color)) {
+      color = p.color;
+      const hit = Array.prototype.slice
+        .call(document.querySelectorAll('.swatch[data-color]'))
+        .filter(b => b.dataset.color.toLowerCase() === color.toLowerCase())[0];
+      setActive(hit || null);
+      if (!hit && customColor) customColor.value = color;
+    }
+    if (p.withDate) withDateEl.checked = true;
+  })();
+
+  syncWidth();
+  syncDateState();
+  syncUndo();
+
+  // 点色块不弹 input/change 事件，用一次点击冒泡兜底保存
+  document.addEventListener('click', () => setTimeout(savePrefs, 0));
+  widthEl.addEventListener('change', savePrefs);
+  withDateEl.addEventListener('change', savePrefs);
+  dateInput.addEventListener('change', savePrefs);
 
   setup();
 })();
