@@ -55,11 +55,22 @@
   .group > label { font-size: 13px; color: #5c6270; }
 
   .swatch {
+    display: inline-block; position: relative; overflow: hidden;
     width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent;
-    cursor: pointer; padding: 0; outline: none;
+    cursor: pointer; padding: 0; outline: none; flex: 0 0 auto;
     box-shadow: 0 0 0 1px #dcdfe4 inset;
+    transition: transform .1s;
   }
+  .swatch:hover { transform: scale(1.08); }
   .swatch.on { border-color: #fff; box-shadow: 0 0 0 2px #1f2329; }
+
+  .swatch.custom {
+    background: conic-gradient(from 30deg, #e5484d, #f5a623, #46a758, #12a594, #0090ff, #8e4ec6, #e5484d);
+  }
+  .swatch.custom input[type=color] {
+    position: absolute; inset: -6px; width: 44px; height: 44px;
+    border: 0; padding: 0; opacity: 0; cursor: pointer;
+  }
 
   input[type=range] { width: 110px; accent-color: #1f2329; cursor: pointer; }
   input[type=date] {
@@ -119,10 +130,16 @@
 
     <div class="toolbar">
       <div class="group">
-        <label>颜色</label>
-        <button class="swatch on" data-color="#111111" style="background:#111111" title="黑"></button>
-        <button class="swatch" data-color="#1a3a8f" style="background:#1a3a8f" title="蓝黑"></button>
-        <button class="swatch" data-color="#000080" style="background:#000080" title="蓝"></button>
+        <label>墨水</label>
+        <button class="swatch on" data-color="#000000" style="background:#000000" title="纯黑"></button>
+        <button class="swatch" data-color="#333333" style="background:#333333" title="深灰"></button>
+        <button class="swatch" data-color="#1a3a8f" style="background:#1a3a8f" title="蓝黑 · 公文常用"></button>
+        <button class="swatch" data-color="#0a4fa8" style="background:#0a4fa8" title="标准蓝"></button>
+        <button class="swatch" data-color="#002060" style="background:#002060" title="藏青"></button>
+        <button class="swatch" data-color="#c62828" style="background:#c62828" title="红"></button>
+        <label class="swatch custom" title="自定义颜色">
+          <input type="color" id="customColor" value="#000000" aria-label="自定义颜色">
+        </label>
       </div>
 
       <div class="group">
@@ -170,7 +187,7 @@
     ctx.lineJoin = 'round';
   }
 
-  let color = '#111111';
+  let color = '#000000';
   let lineWidth = 3.2;
   let drawing = false;
   let prev = null, prevMid = null, moved = false;
@@ -272,13 +289,25 @@
   cvs.addEventListener('pointerleave', end);
   cvs.addEventListener('contextmenu', e => e.preventDefault());
 
-  document.querySelectorAll('.swatch').forEach(btn => {
+  function setActive(btn) {
+    document.querySelectorAll('.swatch').forEach(b => b.classList.remove('on'));
+    if (btn) btn.classList.add('on');
+  }
+
+  document.querySelectorAll('.swatch[data-color]').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.swatch').forEach(b => b.classList.remove('on'));
-      btn.classList.add('on');
+      setActive(btn);
       color = btn.dataset.color;
     });
   });
+
+  const customColor = document.getElementById('customColor');
+  if (customColor) {
+    customColor.addEventListener('input', () => {
+      color = customColor.value;
+      setActive(null);   // 自定义色不点亮任何预设
+    });
+  }
 
   document.getElementById('width').addEventListener('input', e => {
     lineWidth = parseFloat(e.target.value);
