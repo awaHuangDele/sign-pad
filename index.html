@@ -256,6 +256,7 @@
 
       <button id="heatBtn" class="toggle" title="按书写力度/速度给笔迹上色">力度热力图</button>
       <button id="undo" disabled>撤销</button>
+      <button id="redo" disabled>重做</button>
       <button id="clear">清空</button>
     </div>
 
@@ -313,7 +314,11 @@
 
 <script>
 (function () {
-  const W = 1200, H = 420, S = 2;          // 逻辑尺寸 × 超采样，导出更清晰
+  // 窄屏换成更方的画布：360px 宽的手机上，1200×420 只剩 126px 高，手指根本写不开
+  const NARROW = window.innerWidth < 720;
+  const W = NARROW ? 900 : 1200;
+  const H = NARROW ? 640 : 420;
+  const S = 2;                             // 超采样倍率，导出更清晰
   const DATE_GAP = 64;                     // 勾选日期时，内容画布下方追加的逻辑高度
   const CROP_PAD = 24;                     // 导出裁剪时四周留的逻辑留白
   const cvs = document.getElementById('pad');
@@ -335,32 +340,48 @@
   let lastT = 0;
   let drawing = false;
   let prev = null, prevMid = null, moved = false;
-  let strokes = [];           // 每一笔的段数据，供热力图和后续重绘使用
-  let curSegs = null;
+  let strokes = [];           // [{ color, width, segs: [...] }]，画布内容的唯一真源
+  let curStroke = null;
   let lastPointerType = 'mouse';
-  const history = [];
-  const MAX_HISTORY = 6;
+
+  // 撤销栈只存笔画数组的浅拷贝，不再存整张位图，所以步数可以放得很宽
+  const undoStack = [];
+  const redoStack = [];
+  const MAX_UNDO = 100;
   const undoBtn = document.getElementById('undo');
+  const redoBtn = document.getElementById('redo');
 
-  function syncUndo() { undoBtn.disabled = history.length === 0; }
-
-  // 快照同时存像素和笔画数据，撤销时两者一起回退，否则热力图会和画面脱节
-  function snapshot() {
-    try {
-      history.push({
-        img: ctx.getImageData(0, 0, cvs.width, cvs.height),
-        strokes: strokes.slice()
-      });
-    } catch (e) {}
-    if (history.length > MAX_HISTORY) history.shift();
-    syncUndo();
+  function syncUndoRedo() {
+    undoBtn.disabled = undoStack.length === 0;
+    if (redoBtn) redoBtn.disabled = redoStack.length === 0;
   }
 
-  // 清空笔迹但保留历史 —— 清空本身也应该能撤销回来
-  function clearCanvas() {
+  function pushUndo() {
+    undoStack.push(strokes.slice());
+    if (undoStack.length > MAX_UNDO) undoStack.shift();
+    redoStack.length = 0;          // 产生新分支，重做作废
+    syncUndoRedo();
+  }
+
+  // 整幅重绘：画布内容完全由 strokes 推导，撤销、重做、换色都靠这一次重放
+  function renderAll() {
     ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, cvs.width, cvs.height);
+    ctx.setTransform(S, 0, 0, S, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (let i = 0; i < strokes.length; i++) {
+      const st = strokes[i];
+      ctx.strokeStyle = st.color;
+      for (let j = 0; j < st.segs.length; j++) {
+        const g = st.segs[j];
+        ctx.lineWidth = Math.max(0.4, st.width * g.w);
+        ctx.beginPath();
+        ctx.moveTo(g.x0, g.y0);
+        ctx.quadraticCurveTo(g.cx, g.cy, g.x1, g.y1);
+        ctx.stroke();
+      }
+    }
     ctx.restore();
   }
 
@@ -388,9 +409,9 @@
     ctx.moveTo(prevMid.x, prevMid.y);
     ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
     ctx.stroke();
-    if (curSegs) {
-      curSegs.push({ x0: prevMid.x, y0: prevMid.y, cx: prev.x, cy: prev.y, x1: mid.x, y1: mid.y, w: wf });
-    }
+    curStroke.segs.push({
+      x0: prevMid.x, y0: prevMid.y, cx: prev.x, cy: prev.y, x1: mid.x, y1: mid.y, w: wf
+    });
     prevMid = mid;
     prev = p;
   }
@@ -412,16 +433,16 @@
     e.preventDefault();
     drawing = true;
     moved = false;
-    snapshot();
+    pushUndo();
     const r = cvs.getBoundingClientRect();
     const p = toLocal(e, r);
     prev = p; prevMid = p;
     curW = 0.62;                                   // 起笔略细
     lastT = e.timeStamp || performance.now();
     lastPointerType = e.pointerType || 'mouse';
-    curSegs = [];
+    curStroke = { color: color, width: lineWidth, segs: [] };
     try { cvs.setPointerCapture(e.pointerId); } catch (_) {}
-    // 落笔先点一个圆，单击也能留下墨迹
+    // 落笔先点一个圆，单击也能立刻看到墨迹
     applyStyle();
     ctx.beginPath();
     ctx.arc(p.x, p.y, Math.max(0.4, lineWidth * (1 + (curW - 1) * inkStrength)) / 2, 0, Math.PI * 2);
@@ -454,8 +475,10 @@
 
   function end() {
     if (!drawing) return;
-    // 收笔补完最后半段，否则终点会比实际手势短一截
+    if (!curStroke) { drawing = false; return; }
+
     if (moved && prev) {
+      // 收笔补完最后半段，否则终点会比实际手势短一截
       const wf = 1 + (curW - 1) * inkStrength;
       applyStyle();
       ctx.lineWidth = Math.max(0.4, lineWidth * wf);
@@ -463,14 +486,27 @@
       ctx.moveTo(prevMid.x, prevMid.y);
       ctx.quadraticCurveTo(prev.x, prev.y, prev.x, prev.y);
       ctx.stroke();
-      if (curSegs) {
-        curSegs.push({ x0: prevMid.x, y0: prevMid.y, cx: prev.x, cy: prev.y, x1: prev.x, y1: prev.y, w: wf });
-      }
+      curStroke.segs.push({
+        x0: prevMid.x, y0: prevMid.y, cx: prev.x, cy: prev.y, x1: prev.x, y1: prev.y, w: wf
+      });
+    } else if (prev) {
+      // 只点了一下没拖动：补一个极短段，靠圆头笔帽落成一个点。
+      // 不补的话重绘时这个点会消失
+      const wf = 1 + (curW - 1) * inkStrength;
+      curStroke.segs.push({
+        x0: prev.x, y0: prev.y, cx: prev.x, cy: prev.y, x1: prev.x + 0.5, y1: prev.y, w: wf
+      });
     }
-    if (curSegs && curSegs.length) strokes.push({ segs: curSegs });
-    curSegs = null;
+
+    if (curStroke.segs.length) {
+      strokes.push(curStroke);
+    } else {
+      undoStack.pop();          // 什么都没画出来，撤销点作废
+    }
+    curStroke = null;
     drawing = false;
     prev = null; prevMid = null; moved = false;
+    syncUndoRedo();
     refreshHeat();
     refreshPdfSig();
   }
@@ -487,18 +523,32 @@
     if (btn) btn.classList.add('on');
   }
 
+  // 换墨色时连已经写好的笔迹一起换 —— 签名多是单色，写完想换颜色不该逼人重写
+  function applyColor(c) {
+    color = c;
+    if (!strokes.length) return;
+    pushUndo();
+    strokes = strokes.map(function (s) {
+      return { color: c, width: s.width, segs: s.segs };
+    });
+    renderAll();
+    refreshPdfSig();
+    toast('整幅已换色，撤销可回退');
+  }
+
   document.querySelectorAll('.swatch[data-color]').forEach(btn => {
     btn.addEventListener('click', () => {
       setActive(btn);
-      color = btn.dataset.color;
+      applyColor(btn.dataset.color);
     });
   });
 
   const customColor = document.getElementById('customColor');
   if (customColor) {
-    customColor.addEventListener('input', () => {
-      color = customColor.value;
+    // 用 change 而不是 input：拖取色器时 input 会连续触发，每次都重绘会卡
+    customColor.addEventListener('change', () => {
       setActive(null);   // 自定义色不点亮任何预设
+      applyColor(customColor.value);
     });
   }
 
@@ -525,28 +575,38 @@
   taperEl.addEventListener('input', syncTaper);
 
   function doUndo() {
-    const snap = history.pop();
-    if (!snap) { toast('没有可撤销的笔迹'); return; }
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.putImageData(snap.img, 0, 0);
-    ctx.restore();
-    // putImageData 直接写设备像素，之后要重建变换才能继续按逻辑坐标书写
-    ctx.setTransform(S, 0, 0, S, 0, 0);
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    strokes = snap.strokes.slice();
-    syncUndo();
+    if (!undoStack.length) { toast('没有可撤销的笔迹'); return; }
+    redoStack.push(strokes.slice());
+    strokes = undoStack.pop();
+    renderAll();
+    syncUndoRedo();
     refreshHeat();
     refreshPdfSig();
   }
-  undoBtn.addEventListener('click', doUndo);
 
-  // Ctrl / Cmd + Z 撤销
+  function doRedo() {
+    if (!redoStack.length) { toast('没有可重做的笔迹'); return; }
+    undoStack.push(strokes.slice());
+    strokes = redoStack.pop();
+    renderAll();
+    syncUndoRedo();
+    refreshHeat();
+    refreshPdfSig();
+  }
+
+  undoBtn.addEventListener('click', doUndo);
+  if (redoBtn) redoBtn.addEventListener('click', doRedo);
+
+  // Ctrl/Cmd + Z 撤销，Ctrl/Cmd + Shift + Z 或 Ctrl + Y 重做
   window.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && (e.key || '').toLowerCase() === 'z' && !e.shiftKey) {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const k = (e.key || '').toLowerCase();
+    if (k === 'z' && !e.shiftKey) {
       e.preventDefault();
       doUndo();
+    } else if ((k === 'z' && e.shiftKey) || k === 'y') {
+      e.preventDefault();
+      doRedo();
     }
   });
 
@@ -563,7 +623,7 @@
 
   clearBtn.addEventListener('click', () => {
     if (!clearArmed) {
-      if (inkBounds(cvs) === null) { toast('画布本来就是空的'); return; }
+      if (!strokes.length) { toast('画布本来就是空的'); return; }
       clearArmed = true;
       clearBtn.classList.add('armed');
       clearBtn.textContent = '再点一次';
@@ -571,9 +631,9 @@
       return;
     }
     disarmClear();
-    snapshot();
-    clearCanvas();
+    pushUndo();
     strokes = [];
+    renderAll();
     refreshHeat();
     refreshPdfSig();
     toast('已清空，按撤销可找回');
@@ -719,8 +779,8 @@
 
     const all = [];
     for (let i = 0; i < strokes.length; i++) {
-      const segs = strokes[i].segs;
-      for (let j = 0; j < segs.length; j++) all.push(segs[j]);
+      const st = strokes[i];
+      for (let j = 0; j < st.segs.length; j++) all.push({ g: st.segs[j], bw: st.width });
     }
     heatCtx.setTransform(1, 0, 0, 1, 0, 0);
     heatCtx.clearRect(0, 0, heatCvs.width, heatCvs.height);
@@ -729,8 +789,8 @@
     // 按本次书写实际用到的范围归一化，不同设备都能铺满整个色域
     let lo = Infinity, hi = -Infinity;
     for (let i = 0; i < all.length; i++) {
-      if (all[i].w < lo) lo = all[i].w;
-      if (all[i].w > hi) hi = all[i].w;
+      if (all[i].g.w < lo) lo = all[i].g.w;
+      if (all[i].g.w > hi) hi = all[i].g.w;
     }
     if (hi - lo < 0.04) { const m = (lo + hi) / 2; lo = m - 0.02; hi = m + 0.02; }
 
@@ -745,10 +805,10 @@
     t2.globalAlpha = 0.6;
 
     for (let i = 0; i < all.length; i++) {
-      const g = all[i];
+      const g = all[i].g;
       const t = Math.max(0, Math.min(1, (g.w - lo) / (hi - lo)));
       t2.strokeStyle = 'hsl(' + (220 - t * 220) + ', 92%, 52%)';
-      t2.lineWidth = Math.max(2.5, lineWidth * g.w * 1.55);
+      t2.lineWidth = Math.max(2.5, all[i].bw * g.w * 1.55);
       t2.beginPath();
       t2.moveTo(g.x0, g.y0);
       t2.quadraticCurveTo(g.cx, g.cy, g.x1, g.y1);
@@ -1036,7 +1096,7 @@
   syncWidth();
   syncTaper();
   syncDateState();
-  syncUndo();
+  syncUndoRedo();
 
   // 点色块不弹 input/change 事件，用一次点击冒泡兜底保存
   document.addEventListener('click', () => setTimeout(savePrefs, 0));
