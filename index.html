@@ -117,6 +117,72 @@
     background: #fdecec; border-color: #eeb0b0; color: #b3261e;
   }
   #clear.armed:hover { background: #fbdede; }
+
+  /* 力度热力图 */
+  #heat {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    opacity: 0; transition: opacity .25s; pointer-events: none;
+  }
+  #heat.show { opacity: 1; }
+  #pad.faded { opacity: .2; transition: opacity .25s; }
+
+  .heat-legend {
+    position: absolute; right: 12px; bottom: 10px;
+    display: none; align-items: center; gap: 6px;
+    font-size: 11px; color: #7b818c;
+    background: rgba(255, 255, 255, .87); padding: 4px 9px; border-radius: 20px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .07); pointer-events: none;
+  }
+  .heat-legend.on { display: flex; }
+  .heat-legend em { font-style: normal; opacity: .72; margin-left: 1px; }
+  .heat-legend i {
+    display: block; width: 68px; height: 6px; border-radius: 3px;
+    background: linear-gradient(90deg,
+      hsl(220, 92%, 55%), hsl(160, 90%, 42%), hsl(110, 85%, 45%),
+      hsl(55, 92%, 50%), hsl(0, 92%, 55%));
+  }
+
+  button.toggle.on { background: #1f2329; border-color: #1f2329; color: #fff; }
+
+  /* PDF 签字 */
+  .pdf-card { margin-top: 18px; }
+  .card-head h2 { font-size: 15px; font-weight: 600; margin: 0 0 5px; }
+  .card-head p { font-size: 12.5px; color: #8a8f99; margin: 0 0 16px; line-height: 1.65; }
+
+  .drop {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 5px; padding: 26px 16px; border-radius: 9px; cursor: pointer;
+    border: 1.5px dashed #d6d9de; background: #fbfbfc;
+    transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over { border-color: #9aa1ac; background: #f5f6f8; }
+  .drop b { font-size: 13.5px; font-weight: 600; }
+  .drop small { font-size: 12px; color: #9298a2; }
+
+  .pdf-bar { display: flex; align-items: center; gap: 10px; margin: 12px 0; flex-wrap: wrap; }
+  .pdf-pageno {
+    font-size: 12.5px; color: #5c6270; min-width: 46px; text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  button.mini { padding: 5px 11px; font-size: 12.5px; }
+  .pdf-size-label { display: flex; align-items: center; gap: 7px; font-size: 13px; color: #5c6270; }
+  .pdf-tip { font-size: 12px; color: #9298a2; }
+
+  .pdf-stage {
+    display: flex; justify-content: center; padding: 14px;
+    background: #f0f1f3; border-radius: 9px;
+  }
+  .pdf-page {
+    position: relative; width: 100%; max-width: 440px;
+    background: #fff; box-shadow: 0 2px 14px rgba(0, 0, 0, .14);
+    border-radius: 2px; overflow: hidden; touch-action: none;
+  }
+  #pdfSig {
+    position: absolute; left: 30%; top: 78%; width: 26%;
+    cursor: grab; user-select: none; -webkit-user-select: none;
+    transform: translate(-50%, -50%);
+  }
+  #pdfSig:active { cursor: grabbing; }
   .toast {
     position: fixed; left: 50%; bottom: 34px; transform: translate(-50%, 16px);
     background: #1f2329; color: #fff; font-size: 13px; padding: 9px 18px;
@@ -145,7 +211,12 @@
   <div class="card">
     <div class="pad-shell">
       <canvas id="pad"></canvas>
+      <canvas id="heat"></canvas>
       <div class="baseline"><span>签名</span></div>
+      <div class="heat-legend" id="heatLegend">
+        <span>轻</span><i></i><span>重</span>
+        <em id="heatSrc"></em>
+      </div>
     </div>
 
     <div class="toolbar">
@@ -183,7 +254,8 @@
 
       <div class="spacer"></div>
 
-      <button id="undo">撤销</button>
+      <button id="heatBtn" class="toggle" title="按书写力度/速度给笔迹上色">力度热力图</button>
+      <button id="undo" disabled>撤销</button>
       <button id="clear">清空</button>
     </div>
 
@@ -195,6 +267,45 @@
 
     <div class="hint">
       <b>承诺书小提醒：</b>签名一般用黑色签字笔；日期最好也手写。如果承诺书要求「本人已阅读全文并抄写」，那就得真笔手写，贴图不行。需要按手印的，打印出来签完再按。
+    </div>
+  </div>
+
+  <div class="card pdf-card">
+    <div class="card-head">
+      <h2>在 PDF 上签字</h2>
+      <p>选一份 PDF，把签名拖到落款处，直接导出签好的文件。文件只在浏览器内存里处理，不上传。</p>
+    </div>
+
+    <label class="drop" id="pdfDrop">
+      <input type="file" id="pdfFile" accept="application/pdf" hidden>
+      <b>选择 PDF 文件</b>
+      <small>也可以直接把文件拖到这里</small>
+    </label>
+
+    <div class="pdf-editor" id="pdfEditor" hidden>
+      <div class="pdf-bar">
+        <button id="pdfPrev" class="mini" aria-label="上一页">←</button>
+        <span class="pdf-pageno" id="pdfPageInfo">1 / 1</span>
+        <button id="pdfNext" class="mini" aria-label="下一页">→</button>
+        <span class="spacer"></span>
+        <label class="pdf-size-label">签名宽度
+          <input id="pdfSize" type="range" min="10" max="70" step="1" value="26">
+          <span class="tval" id="pdfSizeVal">26%</span>
+        </label>
+      </div>
+
+      <div class="pdf-stage">
+        <div class="pdf-page" id="pdfPage">
+          <img id="pdfSig" alt="签名位置" draggable="false">
+        </div>
+      </div>
+
+      <div class="pdf-bar">
+        <button id="pdfApply" class="primary">下载签好的 PDF</button>
+        <button id="pdfReset" class="mini">换一个文件</button>
+        <span class="spacer"></span>
+        <span class="pdf-tip" id="pdfTip"></span>
+      </div>
     </div>
   </div>
 </div>
@@ -224,14 +335,23 @@
   let lastT = 0;
   let drawing = false;
   let prev = null, prevMid = null, moved = false;
+  let strokes = [];           // 每一笔的段数据，供热力图和后续重绘使用
+  let curSegs = null;
+  let lastPointerType = 'mouse';
   const history = [];
   const MAX_HISTORY = 6;
   const undoBtn = document.getElementById('undo');
 
   function syncUndo() { undoBtn.disabled = history.length === 0; }
 
+  // 快照同时存像素和笔画数据，撤销时两者一起回退，否则热力图会和画面脱节
   function snapshot() {
-    try { history.push(ctx.getImageData(0, 0, cvs.width, cvs.height)); } catch (e) {}
+    try {
+      history.push({
+        img: ctx.getImageData(0, 0, cvs.width, cvs.height),
+        strokes: strokes.slice()
+      });
+    } catch (e) {}
     if (history.length > MAX_HISTORY) history.shift();
     syncUndo();
   }
@@ -268,6 +388,9 @@
     ctx.moveTo(prevMid.x, prevMid.y);
     ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
     ctx.stroke();
+    if (curSegs) {
+      curSegs.push({ x0: prevMid.x, y0: prevMid.y, cx: prev.x, cy: prev.y, x1: mid.x, y1: mid.y, w: wf });
+    }
     prevMid = mid;
     prev = p;
   }
@@ -295,6 +418,8 @@
     prev = p; prevMid = p;
     curW = 0.62;                                   // 起笔略细
     lastT = e.timeStamp || performance.now();
+    lastPointerType = e.pointerType || 'mouse';
+    curSegs = [];
     try { cvs.setPointerCapture(e.pointerId); } catch (_) {}
     // 落笔先点一个圆，单击也能留下墨迹
     applyStyle();
@@ -331,15 +456,23 @@
     if (!drawing) return;
     // 收笔补完最后半段，否则终点会比实际手势短一截
     if (moved && prev) {
+      const wf = 1 + (curW - 1) * inkStrength;
       applyStyle();
-      ctx.lineWidth = Math.max(0.4, lineWidth * (1 + (curW - 1) * inkStrength));
+      ctx.lineWidth = Math.max(0.4, lineWidth * wf);
       ctx.beginPath();
       ctx.moveTo(prevMid.x, prevMid.y);
       ctx.quadraticCurveTo(prev.x, prev.y, prev.x, prev.y);
       ctx.stroke();
+      if (curSegs) {
+        curSegs.push({ x0: prevMid.x, y0: prevMid.y, cx: prev.x, cy: prev.y, x1: prev.x, y1: prev.y, w: wf });
+      }
     }
+    if (curSegs && curSegs.length) strokes.push({ segs: curSegs });
+    curSegs = null;
     drawing = false;
     prev = null; prevMid = null; moved = false;
+    refreshHeat();
+    refreshPdfSig();
   }
 
   cvs.addEventListener('pointerdown', start);
@@ -392,17 +525,20 @@
   taperEl.addEventListener('input', syncTaper);
 
   function doUndo() {
-    const img = history.pop();
-    if (!img) { toast('没有可撤销的笔迹'); return; }
+    const snap = history.pop();
+    if (!snap) { toast('没有可撤销的笔迹'); return; }
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.putImageData(img, 0, 0);
+    ctx.putImageData(snap.img, 0, 0);
     ctx.restore();
     // putImageData 直接写设备像素，之后要重建变换才能继续按逻辑坐标书写
     ctx.setTransform(S, 0, 0, S, 0, 0);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
+    strokes = snap.strokes.slice();
     syncUndo();
+    refreshHeat();
+    refreshPdfSig();
   }
   undoBtn.addEventListener('click', doUndo);
 
@@ -437,6 +573,9 @@
     disarmClear();
     snapshot();
     clearCanvas();
+    strokes = [];
+    refreshHeat();
+    refreshPdfSig();
     toast('已清空，按撤销可找回');
   });
 
@@ -563,6 +702,294 @@
   document.getElementById('copyBtn').addEventListener('click', copyImage);
   document.getElementById('savePng').addEventListener('click', () => download(false, '签名_透明'));
   document.getElementById('saveWhite').addEventListener('click', () => download(true, '签名_白底'));
+
+  // ── 力度热力图 ─────────────────────────────────────────
+  // 手写笔读真实压力；鼠标和触屏没有压力数据，只能用速度反推，
+  // 所以图例里会标明当前是哪种来源，不把它说成测力计
+  const heatCvs = document.getElementById('heat');
+  const heatCtx = heatCvs.getContext('2d');
+  const heatBtn = document.getElementById('heatBtn');
+  const heatLegend = document.getElementById('heatLegend');
+  const heatSrc = document.getElementById('heatSrc');
+  let heatOn = false;
+
+  function drawHeat() {
+    heatCvs.width = cvs.width;
+    heatCvs.height = cvs.height;
+
+    const all = [];
+    for (let i = 0; i < strokes.length; i++) {
+      const segs = strokes[i].segs;
+      for (let j = 0; j < segs.length; j++) all.push(segs[j]);
+    }
+    heatCtx.setTransform(1, 0, 0, 1, 0, 0);
+    heatCtx.clearRect(0, 0, heatCvs.width, heatCvs.height);
+    if (!all.length) return;
+
+    // 按本次书写实际用到的范围归一化，不同设备都能铺满整个色域
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < all.length; i++) {
+      if (all[i].w < lo) lo = all[i].w;
+      if (all[i].w > hi) hi = all[i].w;
+    }
+    if (hi - lo < 0.04) { const m = (lo + hi) / 2; lo = m - 0.02; hi = m + 0.02; }
+
+    // 先画到临时画布，再整体模糊一次盖上去，比逐段 filter 快得多
+    const tmp = document.createElement('canvas');
+    tmp.width = cvs.width;
+    tmp.height = cvs.height;
+    const t2 = tmp.getContext('2d');
+    t2.setTransform(S, 0, 0, S, 0, 0);
+    t2.lineCap = 'round';
+    t2.lineJoin = 'round';
+    t2.globalAlpha = 0.6;
+
+    for (let i = 0; i < all.length; i++) {
+      const g = all[i];
+      const t = Math.max(0, Math.min(1, (g.w - lo) / (hi - lo)));
+      t2.strokeStyle = 'hsl(' + (220 - t * 220) + ', 92%, 52%)';
+      t2.lineWidth = Math.max(2.5, lineWidth * g.w * 1.55);
+      t2.beginPath();
+      t2.moveTo(g.x0, g.y0);
+      t2.quadraticCurveTo(g.cx, g.cy, g.x1, g.y1);
+      t2.stroke();
+    }
+
+    heatCtx.save();
+    heatCtx.filter = 'blur(' + Math.round(3.5 * S) + 'px)';
+    heatCtx.drawImage(tmp, 0, 0);
+    heatCtx.restore();
+    heatCtx.globalAlpha = 0.62;      // 再叠一层清晰的，保住笔迹轮廓
+    heatCtx.drawImage(tmp, 0, 0);
+    heatCtx.globalAlpha = 1;
+  }
+
+  function refreshHeat() { if (heatOn) drawHeat(); }
+
+  heatBtn.addEventListener('click', () => {
+    heatOn = !heatOn;
+    heatBtn.classList.toggle('on', heatOn);
+    heatCvs.classList.toggle('show', heatOn);
+    cvs.classList.toggle('faded', heatOn);
+    heatLegend.classList.toggle('on', heatOn);
+    if (heatSrc) {
+      heatSrc.textContent = lastPointerType === 'pen' ? '真实压感' : '速度反推';
+      heatSrc.title = lastPointerType === 'pen'
+        ? '数据来自手写笔的真实压力'
+        : '鼠标和触屏没有压力数据，这里按书写速度推算，不是真实压力';
+    }
+    if (heatOn) drawHeat();
+  });
+
+  // ── PDF 签字 ───────────────────────────────────────────
+  // 用 DOM 按 PDF 真实页面比例画一张示意页，签名拖到落点上，导出时按同样的
+  // 相对坐标写进去。这样不必引入 PDF.js 渲染引擎（那又要多 1MB）
+  const pdfFileEl = document.getElementById('pdfFile');
+  const pdfDrop = document.getElementById('pdfDrop');
+  const pdfEditor = document.getElementById('pdfEditor');
+  const pdfPage = document.getElementById('pdfPage');
+  const pdfSig = document.getElementById('pdfSig');
+  const pdfPageInfo = document.getElementById('pdfPageInfo');
+  const pdfSizeEl = document.getElementById('pdfSize');
+  const pdfSizeVal = document.getElementById('pdfSizeVal');
+  const pdfTip = document.getElementById('pdfTip');
+
+  const pdfState = {
+    lib: null, bytes: null, doc: null, pageCount: 0, pageIndex: 0,
+    size: { w: 595, h: 842 }, pos: { x: 30, y: 78 }, ratio: 26, name: 'document'
+  };
+
+  let pdfLibPromise = null;
+  function loadPdfLib() {
+    if (window.PDFLib) return Promise.resolve(window.PDFLib);
+    if (!pdfLibPromise) {
+      pdfLibPromise = new Promise(function (resolve, reject) {
+        const s = document.createElement('script');
+        s.src = 'vendor/pdf-lib.min.js';
+        s.onload = function () {
+          if (window.PDFLib) resolve(window.PDFLib);
+          else reject(new Error('lib'));
+        };
+        s.onerror = function () { reject(new Error('lib')); };
+        document.head.appendChild(s);
+      });
+    }
+    return pdfLibPromise;
+  }
+
+  function applySigPos() {
+    pdfSig.style.left = pdfState.pos.x + '%';
+    pdfSig.style.top = pdfState.pos.y + '%';
+    pdfSig.style.width = pdfState.ratio + '%';
+  }
+
+  function syncSigPreview() {
+    const out = renderCropped(false);
+    if (!out) {
+      pdfSig.style.display = 'none';
+      pdfTip.textContent = '先在上面写个签名';
+      return;
+    }
+    pdfSig.style.display = '';
+    pdfSig.src = out.toDataURL('image/png');
+    pdfTip.textContent = '';
+    applySigPos();
+  }
+
+  function syncPageView() {
+    if (!pdfState.doc) return;
+    const sz = pdfState.doc.getPage(pdfState.pageIndex).getSize();
+    pdfState.size = { w: sz.width, h: sz.height };
+    pdfPage.style.aspectRatio = sz.width + ' / ' + sz.height;
+    pdfPageInfo.textContent = (pdfState.pageIndex + 1) + ' / ' + pdfState.pageCount;
+    applySigPos();
+  }
+
+  async function openPdf(file) {
+    if (!file) return;
+    if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') {
+      toast('请选一个 PDF 文件');
+      return;
+    }
+    pdfTip.textContent = '正在读取…';
+    try {
+      const lib = await loadPdfLib();
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const doc = await lib.PDFDocument.load(bytes, { ignoreEncryption: true });
+      pdfState.lib = lib;
+      pdfState.bytes = bytes;
+      pdfState.doc = doc;
+      pdfState.pageCount = doc.getPageCount();
+      pdfState.pageIndex = pdfState.pageCount - 1;      // 落款通常在最后一页
+      pdfState.name = (file.name || 'document').replace(/\.pdf$/i, '');
+      pdfDrop.hidden = true;
+      pdfEditor.hidden = false;
+      syncSigPreview();
+      syncPageView();
+    } catch (e) {
+      pdfDrop.hidden = false;
+      pdfEditor.hidden = true;
+      toast(e && e.message === 'lib'
+        ? 'PDF 组件没加载成功，确认 vendor/pdf-lib.min.js 还在'
+        : '这个 PDF 打不开，可能加了密码');
+    }
+  }
+
+  pdfFileEl.addEventListener('change', function (e) {
+    const f = e.target.files && e.target.files[0];
+    if (f) openPdf(f);
+  });
+
+  ['dragenter', 'dragover'].forEach(function (t) {
+    pdfDrop.addEventListener(t, function (e) {
+      e.preventDefault();
+      pdfDrop.classList.add('over');
+    });
+  });
+  ['dragleave', 'drop'].forEach(function (t) {
+    pdfDrop.addEventListener(t, function (e) {
+      e.preventDefault();
+      pdfDrop.classList.remove('over');
+    });
+  });
+  pdfDrop.addEventListener('drop', function (e) {
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) openPdf(f);
+  });
+
+  // 拖动签名定位
+  let pdfDrag = false;
+  pdfSig.addEventListener('pointerdown', function (e) {
+    pdfDrag = true;
+    e.preventDefault();
+    try { pdfSig.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  pdfSig.addEventListener('pointermove', function (e) {
+    if (!pdfDrag) return;
+    const r = pdfPage.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width * 100;
+    const y = (e.clientY - r.top) / r.height * 100;
+    pdfState.pos = {
+      x: Math.max(0, Math.min(100, x)),
+      y: Math.max(0, Math.min(100, y))
+    };
+    applySigPos();
+  });
+  window.addEventListener('pointerup', function () { pdfDrag = false; });
+
+  pdfSizeEl.addEventListener('input', function () {
+    pdfState.ratio = parseFloat(pdfSizeEl.value);
+    pdfSizeVal.textContent = Math.round(pdfState.ratio) + '%';
+    applySigPos();
+  });
+
+  document.getElementById('pdfPrev').addEventListener('click', function () {
+    if (pdfState.pageIndex > 0) { pdfState.pageIndex--; syncPageView(); }
+  });
+  document.getElementById('pdfNext').addEventListener('click', function () {
+    if (pdfState.pageIndex < pdfState.pageCount - 1) { pdfState.pageIndex++; syncPageView(); }
+  });
+
+  document.getElementById('pdfReset').addEventListener('click', function () {
+    pdfState.bytes = null;
+    pdfState.doc = null;
+    pdfDrop.hidden = false;
+    pdfEditor.hidden = true;
+    pdfFileEl.value = '';
+  });
+
+  async function exportPdf() {
+    if (!pdfState.bytes) { toast('先选一个 PDF'); return; }
+    const out = renderCropped(false);
+    if (!out) { toast('先在上面写个签名'); return; }
+    pdfTip.textContent = '正在生成…';
+    try {
+      const lib = pdfState.lib || await loadPdfLib();
+      // 每次都从原始字节重新载入，否则重复导出会把签名一层层叠上去
+      const doc = await lib.PDFDocument.load(pdfState.bytes, { ignoreEncryption: true });
+      const blob = await new Promise(function (r) { out.toBlob(r, 'image/png'); });
+      const png = new Uint8Array(await blob.arrayBuffer());
+      const img = await doc.embedPng(png);
+
+      const page = doc.getPage(pdfState.pageIndex);
+      const sz = page.getSize();
+      const w = sz.width * (pdfState.ratio / 100);
+      const h = w * (img.height / img.width);
+      const cx = sz.width * (pdfState.pos.x / 100);
+      const cyTop = sz.height * (pdfState.pos.y / 100);
+
+      // PDF 原点在左下、y 轴朝上，这里把「距顶部」换算成「距底部」
+      page.drawImage(img, {
+        x: cx - w / 2,
+        y: sz.height - cyTop - h / 2,
+        width: w,
+        height: h
+      });
+
+      const saved = await doc.save();
+      const a = document.createElement('a');
+      a.download = pdfState.name + '_已签.pdf';
+      a.href = URL.createObjectURL(new Blob([saved], { type: 'application/pdf' }));
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+      pdfTip.textContent = '';
+      toast('已导出签好的 PDF');
+    } catch (e) {
+      pdfTip.textContent = '';
+      toast('导出失败：' + (e && e.message ? e.message : '未知错误'));
+    }
+  }
+  document.getElementById('pdfApply').addEventListener('click', exportPdf);
+
+  // 签名改动后，示意页上的缩略图跟着更新（防抖，免得每次落笔都编码一遍 PNG）
+  let pdfSigTimer;
+  function refreshPdfSig() {
+    if (!pdfState.bytes || pdfEditor.hidden) return;
+    clearTimeout(pdfSigTimer);
+    pdfSigTimer = setTimeout(syncSigPreview, 350);
+  }
 
   let toastTimer;
   function toast(msg) {
