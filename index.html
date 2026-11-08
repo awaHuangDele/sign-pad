@@ -28,13 +28,10 @@
 
   .pad-shell {
     position: relative; border-radius: 8px; overflow: hidden;
-    background-color: #fff;
-    background-image:
-      linear-gradient(45deg, #f0f1f3 25%, transparent 25%, transparent 75%, #f0f1f3 75%),
-      linear-gradient(45deg, #f0f1f3 25%, transparent 25%, transparent 75%, #f0f1f3 75%);
-    background-size: 14px 14px;
-    background-position: 0 0, 7px 7px;
-    border: 1px solid #e3e5e8;
+    background-color: #fefefd;
+    background-image: radial-gradient(130% 110% at 50% -10%, #ffffff 0%, #fcfbf8 55%, #f8f5f0 100%);
+    border: 1px solid #e9e6e0;
+    box-shadow: inset 0 1px 3px rgba(60, 50, 35, .03);
   }
   canvas {
     display: block; width: 100%; height: auto; touch-action: none;
@@ -109,6 +106,11 @@
     background: #1f2329; transition: width .1s, height .1s;
   }
 
+  .tval {
+    font-size: 12px; color: #8a8f99; min-width: 32px; text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
   input[type=date]:disabled { opacity: .42; cursor: not-allowed; }
 
   #clear.armed {
@@ -167,6 +169,12 @@
       </div>
 
       <div class="group">
+        <label>笔锋</label>
+        <input id="taper" type="range" min="0" max="100" step="5" value="70">
+        <span class="tval" id="tval">70%</span>
+      </div>
+
+      <div class="group">
         <label style="gap:6px; display:flex; align-items:center;">
           <input id="withDate" type="checkbox"> 加日期
         </label>
@@ -180,7 +188,8 @@
     </div>
 
     <div class="toolbar foot" style="margin-top:12px">
-      <button id="savePng" class="primary">导出透明 PNG</button>
+      <button id="copyBtn" class="primary">复制图片</button>
+      <button id="savePng">导出透明 PNG</button>
       <button id="saveWhite">导出白底 PNG</button>
     </div>
 
@@ -210,6 +219,9 @@
 
   let color = '#000000';
   let lineWidth = 3.2;
+  let inkStrength = 0.7;      // 笔锋强度 0–1
+  let curW = 1;               // 当前笔画宽度系数，跟着压力或速度走
+  let lastT = 0;
   let drawing = false;
   let prev = null, prevMid = null, moved = false;
   const history = [];
@@ -242,21 +254,34 @@
   function applyStyle() {
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
-    ctx.lineWidth = lineWidth;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
   }
 
   // 每段都从「上一个中点」画到「当前中点」，以上一个采样点为控制点。
   // 起点接上一段的终点，段与段首尾相连，中间不留缝。
-  function segment(p) {
+  // 线宽逐段设置，配合压感才有笔锋
+  function segment(p, wf) {
     const mid = { x: (prev.x + p.x) / 2, y: (prev.y + p.y) / 2 };
+    ctx.lineWidth = Math.max(0.4, lineWidth * wf);
     ctx.beginPath();
     ctx.moveTo(prevMid.x, prevMid.y);
     ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
     ctx.stroke();
     prevMid = mid;
     prev = p;
+  }
+
+  // 笔锋来源：手写笔直接取压力；鼠标和手指没有压力，就用划动速度反推，
+  // 划得快线细、划得慢线粗，接近真笔的手感
+  function widthFactor(ev, p, now) {
+    if (ev.pointerType === 'pen' && ev.pressure > 0.01) {
+      return 0.55 + ev.pressure * 0.95;
+    }
+    const d = Math.sqrt((p.x - prev.x) * (p.x - prev.x) + (p.y - prev.y) * (p.y - prev.y));
+    const dt = Math.max(1, now - lastT);
+    const speed = d / dt;
+    return Math.max(0.5, Math.min(1.15, 1.15 - speed * 0.42));
   }
 
   function start(e) {
@@ -268,11 +293,13 @@
     const r = cvs.getBoundingClientRect();
     const p = toLocal(e, r);
     prev = p; prevMid = p;
+    curW = 0.62;                                   // 起笔略细
+    lastT = e.timeStamp || performance.now();
     try { cvs.setPointerCapture(e.pointerId); } catch (_) {}
     // 落笔先点一个圆，单击也能留下墨迹
     applyStyle();
     ctx.beginPath();
-    ctx.arc(p.x, p.y, lineWidth / 2.2, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, Math.max(0.4, lineWidth * (1 + (curW - 1) * inkStrength)) / 2, 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -285,10 +312,17 @@
     const list = (raw && raw.length) ? raw : [e];
     applyStyle();
     for (let i = 0; i < list.length; i++) {
-      const p = toLocal(list[i], r);
+      const ev = list[i];
+      const p = toLocal(ev, r);
       // 亚像素抖动直接丢弃，否则细线会被反复擦断
       if (Math.abs(p.x - prev.x) + Math.abs(p.y - prev.y) < 0.35) continue;
-      segment(p);
+
+      const now = ev.timeStamp || performance.now();
+      const target = widthFactor(ev, p, now);
+      // 平滑追随，避免线宽逐段跳变
+      curW = curW * 0.62 + target * 0.38;
+      segment(p, 1 + (curW - 1) * inkStrength);
+      lastT = now;
       moved = true;
     }
   }
@@ -298,6 +332,7 @@
     // 收笔补完最后半段，否则终点会比实际手势短一截
     if (moved && prev) {
       applyStyle();
+      ctx.lineWidth = Math.max(0.4, lineWidth * (1 + (curW - 1) * inkStrength));
       ctx.beginPath();
       ctx.moveTo(prevMid.x, prevMid.y);
       ctx.quadraticCurveTo(prev.x, prev.y, prev.x, prev.y);
@@ -346,6 +381,15 @@
     }
   }
   widthEl.addEventListener('input', syncWidth);
+
+  const taperEl = document.getElementById('taper');
+  const tvalEl = document.getElementById('tval');
+
+  function syncTaper() {
+    inkStrength = parseFloat(taperEl.value) / 100;
+    if (tvalEl) tvalEl.textContent = Math.round(inkStrength * 100) + '%';
+  }
+  taperEl.addEventListener('input', syncTaper);
 
   function doUndo() {
     const img = history.pop();
@@ -462,10 +506,11 @@
       '_' + p(n.getHours()) + p(n.getMinutes());
   }
 
-  function download(whiteBg, base) {
+  // 渲染 + 裁剪，返回可直接用的画布；一个字没写返回 null
+  function renderCropped(whiteBg) {
     const built = buildContent();
+    if (!built.sig) return null;
     const content = built.canvas;
-    if (!built.sig) { toast('先写个名字再导出'); return; }
     const b = inkBounds(content);
 
     // 按墨迹外接框裁掉四周空白，只留一点呼吸感
@@ -484,10 +529,14 @@
       o.fillRect(0, 0, out.width, out.height);
     }
     o.drawImage(content, x0, y0, out.width, out.height, 0, 0, out.width, out.height);
+    return out;
+  }
 
-    const name = base + '_' + stamp() + '.png';
+  function download(whiteBg, base) {
+    const out = renderCropped(whiteBg);
+    if (!out) { toast('先写个名字再导出'); return; }
     const a = document.createElement('a');
-    a.download = name;
+    a.download = base + '_' + stamp() + '.png';
     a.href = out.toDataURL('image/png');
     document.body.appendChild(a);
     a.click();
@@ -495,6 +544,23 @@
     toast('已导出 ' + out.width + ' × ' + out.height);
   }
 
+  // 直接进剪贴板，切到 Word / WPS 按 Ctrl+V 就贴上了，省掉下载再找文件
+  function copyImage() {
+    const out = renderCropped(false);
+    if (!out) { toast('先写个名字再复制'); return; }
+    if (!navigator.clipboard || !window.ClipboardItem) {
+      toast('这个浏览器不支持复制，请用导出 PNG');
+      return;
+    }
+    out.toBlob(function (blob) {
+      if (!blob) { toast('生成图片失败，请用导出 PNG'); return; }
+      navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+        .then(function () { toast('已复制，去文档里粘贴即可'); })
+        .catch(function () { toast('复制被浏览器拦下了，请用导出 PNG'); });
+    }, 'image/png');
+  }
+
+  document.getElementById('copyBtn').addEventListener('click', copyImage);
   document.getElementById('savePng').addEventListener('click', () => download(false, '签名_透明'));
   document.getElementById('saveWhite').addEventListener('click', () => download(true, '签名_白底'));
 
@@ -513,7 +579,7 @@
   function savePrefs() {
     try {
       localStorage.setItem(PREF_KEY, JSON.stringify({
-        color: color, lineWidth: lineWidth, withDate: withDateEl.checked
+        color: color, lineWidth: lineWidth, withDate: withDateEl.checked, taper: inkStrength
       }));
     } catch (_) {}
   }
@@ -525,6 +591,9 @@
 
     if (typeof p.lineWidth === 'number' && p.lineWidth >= 1.5 && p.lineWidth <= 8) {
       widthEl.value = String(p.lineWidth);
+    }
+    if (typeof p.taper === 'number' && p.taper >= 0 && p.taper <= 1) {
+      taperEl.value = String(Math.round(p.taper * 100));
     }
     if (typeof p.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(p.color)) {
       color = p.color;
@@ -538,12 +607,14 @@
   })();
 
   syncWidth();
+  syncTaper();
   syncDateState();
   syncUndo();
 
   // 点色块不弹 input/change 事件，用一次点击冒泡兜底保存
   document.addEventListener('click', () => setTimeout(savePrefs, 0));
   widthEl.addEventListener('change', savePrefs);
+  taperEl.addEventListener('change', savePrefs);
   withDateEl.addEventListener('change', savePrefs);
   dateInput.addEventListener('change', savePrefs);
 
