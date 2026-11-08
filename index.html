@@ -36,7 +36,10 @@
     background-position: 0 0, 7px 7px;
     border: 1px solid #e3e5e8;
   }
-  canvas { display: block; width: 100%; height: auto; touch-action: none; cursor: crosshair; }
+  canvas {
+    display: block; width: 100%; height: auto; touch-action: none;
+    cursor: crosshair; user-select: none; -webkit-user-select: none;
+  }
 
   .baseline {
     position: absolute; left: 6%; right: 6%; bottom: 26%;
@@ -157,7 +160,6 @@
   const W = 1200, H = 420, S = 2;          // 逻辑尺寸 × 超采样，导出更清晰
   const cvs = document.getElementById('pad');
   const ctx = cvs.getContext('2d');
-  const dpr = Math.min(window.devicePixelRatio || 1, 3);
 
   function setup() {
     cvs.width = W * S;
@@ -171,7 +173,7 @@
   let color = '#111111';
   let lineWidth = 3.2;
   let drawing = false;
-  let last = null;
+  let prev = null, prevMid = null, moved = false;
   const history = [];
   const MAX_HISTORY = 6;
 
@@ -188,47 +190,86 @@
     history.length = 0;
   }
 
-  function pos(e) {
-    const r = cvs.getBoundingClientRect();
+  function toLocal(e, r) {
     return {
       x: (e.clientX - r.left) / r.width * W,
       y: (e.clientY - r.top) / r.height * H
     };
   }
 
+  function applyStyle() {
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+  }
+
+  // 每段都从「上一个中点」画到「当前中点」，以上一个采样点为控制点。
+  // 起点接上一段的终点，段与段首尾相连，中间不留缝。
+  function segment(p) {
+    const mid = { x: (prev.x + p.x) / 2, y: (prev.y + p.y) / 2 };
+    ctx.beginPath();
+    ctx.moveTo(prevMid.x, prevMid.y);
+    ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
+    ctx.stroke();
+    prevMid = mid;
+    prev = p;
+  }
+
   function start(e) {
     if (e.button !== undefined && e.button !== 0) return;
+    e.preventDefault();
     drawing = true;
+    moved = false;
     snapshot();
-    last = pos(e);
-    cvs.setPointerCapture && cvs.setPointerCapture(e.pointerId);
-    // 点一下也要留墨
+    const r = cvs.getBoundingClientRect();
+    const p = toLocal(e, r);
+    prev = p; prevMid = p;
+    try { cvs.setPointerCapture(e.pointerId); } catch (_) {}
+    // 落笔先点一个圆，单击也能留下墨迹
+    applyStyle();
     ctx.beginPath();
-    ctx.fillStyle = color;
-    ctx.arc(last.x, last.y, lineWidth / 2, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, lineWidth / 2.2, 0, Math.PI * 2);
     ctx.fill();
   }
 
   function move(e) {
     if (!drawing) return;
-    const p = pos(e);
-    const mx = (last.x + p.x) / 2;
-    const my = (last.y + p.y) / 2;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = lineWidth;
-    ctx.beginPath();
-    ctx.moveTo(last.x, last.y);
-    ctx.quadraticCurveTo(last.x, last.y, mx, my);
-    ctx.stroke();
-    last = p;
+    e.preventDefault();
+    const r = cvs.getBoundingClientRect();
+    // 浏览器会把高频采样合并成一个事件，取出全部原始点，快速划动才不断线
+    const raw = e.getCoalescedEvents ? e.getCoalescedEvents() : null;
+    const list = (raw && raw.length) ? raw : [e];
+    applyStyle();
+    for (let i = 0; i < list.length; i++) {
+      const p = toLocal(list[i], r);
+      // 亚像素抖动直接丢弃，否则细线会被反复擦断
+      if (Math.abs(p.x - prev.x) + Math.abs(p.y - prev.y) < 0.35) continue;
+      segment(p);
+      moved = true;
+    }
   }
 
-  function end() { drawing = false; last = null; }
+  function end() {
+    if (!drawing) return;
+    // 收笔补完最后半段，否则终点会比实际手势短一截
+    if (moved && prev) {
+      applyStyle();
+      ctx.beginPath();
+      ctx.moveTo(prevMid.x, prevMid.y);
+      ctx.quadraticCurveTo(prev.x, prev.y, prev.x, prev.y);
+      ctx.stroke();
+    }
+    drawing = false;
+    prev = null; prevMid = null; moved = false;
+  }
 
   cvs.addEventListener('pointerdown', start);
-  cvs.addEventListener('pointermove', move);
+  cvs.addEventListener('pointermove', move, { passive: false });
   window.addEventListener('pointerup', end);
   window.addEventListener('pointercancel', end);
+  cvs.addEventListener('pointerleave', end);
   cvs.addEventListener('contextmenu', e => e.preventDefault());
 
   document.querySelectorAll('.swatch').forEach(btn => {
